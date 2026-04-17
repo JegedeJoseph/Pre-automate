@@ -1,152 +1,338 @@
-# main.py
-import asyncio, smtplib, os, logging
-from email.mime.text import MIMEText
-from datetime import datetime
-from scraper import run_all_scrapers
-from scorer import filter_and_score, deduplicate
-from sheets_logger import get_sheet, get_seen_ids, append_jobs, update_status
-from cover_letter import generate_all_letters
-from applier import apply_to_jobs
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-async def run_pipeline():
-    print("=== Zain Job Automation Pipeline ===")
-    print(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
-
-    try:
-        # 1. Load Google Sheet and seen job IDs
-        logger.info("[1] Loading Google Sheets...")
-        ws = get_sheet()
-        seen_ids = get_seen_ids(ws)
-        print(f"[1] Loaded sheet. {len(seen_ids)} jobs already tracked.")
-
-        # 2. Scrape all platforms
-        print("[2] Scraping job platforms...")
-        logger.info("[2] Starting scrapers...")
-        raw_jobs = run_all_scrapers()
-        print(f"    Scraped {len(raw_jobs)} raw jobs.")
-        
-        if not raw_jobs:
-            print("No jobs scraped today. Exiting.")
-            return
-
-        # 3. Deduplicate
-        print("[3] Deduplicating...")
-        new_jobs = deduplicate(raw_jobs, seen_ids)
-        print(f"    {len(new_jobs)} new jobs after dedup.")
-
-        if not new_jobs:
-            print("No new jobs found. Exiting.")
-            return
-
-        # 4. Score and filter
-        print("[4] Scoring and filtering...")
-        qualified = filter_and_score(new_jobs, threshold=60)
-        auto_apply = [j for j in qualified if j["match_score"] >= 70]
-        print(f"    {len(qualified)} qualified (score ≥ 60) · {len(auto_apply)} for auto-apply (score ≥ 70)")
-
-        # 5. Generate cover letters for auto-apply jobs
-        print("[5] Generating cover letters...")
-        logger.info("[5] Generating cover letters for auto-apply jobs...")
-        letters = await generate_all_letters(auto_apply)
-        logger.info(f"    Generated {len([l for l in letters.values() if l])} cover letters")
-
-        # 6. Log all qualified jobs to Sheets
-        print("[6] Logging to Google Sheets...")
-        logger.info("[6] Appending to Google Sheets...")
-        append_jobs(ws, qualified, letters)
-
-        # 7. Auto-apply
-        applied_count = 0
-        print("[7] Auto-applying...")
-        logger.info("[7] Starting auto-apply process...")
-        
-        apply_results = await apply_to_jobs(auto_apply, letters)
-        
-        for job in auto_apply:
-            job_id = job["job_id"]
-            success = apply_results.get(job_id, False)
-            status = "Applied" if success else "Manual needed"
-            update_status(ws, job_id, status, datetime.now().strftime("%Y-%m-%d %H:%M"))
-            if success:
-                applied_count += 1
-                logger.info(f"    ✓ Applied to {job['title']} @ {job['company']}")
-            else:
-                logger.warning(f"    ✗ Manual apply needed for {job['title']} @ {job['company']}")
-
-        # 8. Send digest email (only if applications succeeded)
-        if applied_count > 0:
-            send_digest(len(qualified), applied_count, auto_apply[:5])
-        
-        print(f"\n=== Done. {len(qualified)} logged · {applied_count} applied ===")
-        logger.info(f"Pipeline complete: {len(qualified)} logged, {applied_count} applied")
-
-    except Exception as e:
-        logger.error(f"Pipeline error: {e}", exc_info=True)
-        print(f"ERROR: {e}")
-        raise
-
-async def attempt_apply(job: dict, cover_letter: str) -> bool:
-    """
-    Deprecated: Use applier.apply_to_job instead.
-    Kept for backward compatibility.
-    """
-    from applier import JobApplier
-    applier = JobApplier()
-    return await applier.apply_to_job(job, cover_letter)
-
-def send_digest(total: int, applied: int, top_jobs: list[dict]):
-    """
-    Send email digest of daily job automation results.
-    Only sent if auto-apply succeeded.
-    """
-    gmail_user = os.environ.get("YOUR_GMAIL", "")
-    gmail_pass = os.environ.get("GMAIL_APP_PASSWORD", "")
-    
-    if not gmail_user or not gmail_pass:
-        logger.warning("Email credentials not configured. Skipping digest.")
-        return
-    
-    body = f"""Daily Job Automation Digest — {datetime.now().strftime('%Y-%m-%d')}
-
-✓ Jobs logged to Sheets: {total}
-✓ Auto-applied: {applied}
-
-Top matches today:
 """
-    
-    for i, j in enumerate(top_jobs, 1):
-        salary = j.get('salary', 'N/A')
-        if salary and not str(salary).startswith('$'):
-            salary = f"${salary}"
-        
-        body += f"\n{i}. [{j['match_score']}/100] {j['title']} @ {j['company']}\n"
-        body += f"   Salary: {salary}\n"
-        body += f"   {j['url']}\n"
+Job Scraper and Matcher - Main Entry Point
+Scrapes job listings from multiple sources and matches them with resume/preferences.
+"""
+import asyncio
+import json
+import sys
+from pathlib import Path
+from typing import List, Optional
 
-    body += f"\nView full tracker: https://docs.google.com/spreadsheets/d/{os.environ.get('SHEET_ID', 'YOUR_SHEET_ID')}\n"
-    body += f"\n---\nThis is an automated message from your Job Bot."
+from dotenv import load_dotenv
+
+from src.resume.parser import ResumeParser
+from src.scraper.jobs import JobScraper
+from src.scraper.matcher import SkillMatcher
+from src.sheets.integration import SheetsService
+from src.models import JobPreferences, Resume
+from src.utils import setup_logger, Config
+
+# Load environment variables
+load_dotenv()
+
+logger = setup_logger(__name__)
+
+
+class JobScraperApplication:
+    """Main application orchestrator for job scraping and matching"""
     
-    msg = MIMEText(body)
-    msg["Subject"] = f"🤖 Job Bot Digest — {total} jobs, {applied} applied"
-    msg["From"] = gmail_user
-    msg["To"] = gmail_user
+    def __init__(self, resume_path: Optional[str] = None, preferences_path: Optional[str] = None):
+        """
+        Initialize the application.
+        
+        Args:
+            resume_path: Path to resume file (PDF, DOCX, or TXT)
+            preferences_path: Path to preferences JSON file
+        """
+        self.resume: Optional[Resume] = None
+        self.preferences: Optional[JobPreferences] = None
+        self.jobs: List = []
+        self.matcher: Optional[SkillMatcher] = None
+        self.sheets_service = SheetsService()
+        self.logger = logger
+        
+        # Load resume and preferences
+        if resume_path:
+            self._load_resume(resume_path)
+        if preferences_path:
+            self._load_preferences(preferences_path)
     
+    def _load_resume(self, resume_path: str) -> None:
+        """Load and parse resume from file"""
+        try:
+            if not Path(resume_path).exists():
+                self.logger.error(f"Resume file not found: {resume_path}")
+                return
+            
+            parser = ResumeParser(resume_path)
+            self.resume = parser.parse()
+            self.logger.info(f"Resume loaded successfully from {resume_path}")
+            self.logger.info(f"Found skills: {', '.join(self.resume.get_skill_names())}")
+        except Exception as e:
+            self.logger.error(f"Error loading resume: {e}")
+    
+    def _load_preferences(self, preferences_path: str) -> None:
+        """Load job preferences from JSON file"""
+        try:
+            if not Path(preferences_path).exists():
+                self.logger.error(f"Preferences file not found: {preferences_path}")
+                return
+            
+            with open(preferences_path, 'r') as f:
+                prefs_data = json.load(f)
+            
+            self.preferences = JobPreferences(**prefs_data)
+            self.logger.info(f"Preferences loaded successfully")
+        except Exception as e:
+            self.logger.error(f"Error loading preferences: {e}")
+    
+    async def scrape_jobs_async(
+        self,
+        search_query: str,
+        location: str = "",
+        pages: int = 3,
+        sources: Optional[List[str]] = None
+    ) -> List:
+        """
+        Scrape jobs from multiple sources asynchronously.
+        
+        Args:
+            search_query: Job search query
+            location: Geographic location for search
+            pages: Number of pages to scrape per source
+            sources: List of sources to scrape (indeed, linkedin, glassdoor)
+        
+        Returns:
+            List of JobListing objects
+        """
+        self.logger.info(f"Starting job scrape for query: '{search_query}' in {location or 'all locations'}")
+        
+        scraper = JobScraper()
+        jobs = []
+        
+        if sources is None:
+            sources = ["indeed"]  # Default to Indeed if not specified
+        
+        try:
+            jobs = await scraper.scrape_all(
+                search_query=search_query,
+                location=location,
+                pages=pages,
+                sources=sources
+            )
+            self.jobs = jobs
+            self.logger.info(f"Scraped {len(jobs)} total jobs")
+        except Exception as e:
+            self.logger.error(f"Error during scraping: {e}")
+        
+        return jobs
+    
+    def match_and_filter_jobs(self) -> List:
+        """Match and filter jobs based on resume and preferences"""
+        if not self.resume or not self.preferences:
+            self.logger.warning("Resume and preferences must be loaded before matching")
+            return []
+        
+        if not self.jobs:
+            self.logger.warning("No jobs to match")
+            return []
+        
+        self.logger.info(f"Matching {len(self.jobs)} jobs with resume...")
+        self.matcher = SkillMatcher(self.resume, self.preferences)
+        matched_jobs = self.matcher.filter_jobs(self.jobs)
+        
+        self.logger.info(f"Found {len(matched_jobs)} matching jobs")
+        for job in matched_jobs[:5]:
+            self.logger.info(
+                f"  - {job.title} at {job.company} ({job.location}) - "
+                f"Match: {job.match_score:.1f}%"
+            )
+        
+        return matched_jobs
+    
+    def export_to_sheets(self, jobs: List, sheet_name: str = "Sheet1") -> bool:
+        """Export matched jobs to Google Sheets"""
+        if not jobs:
+            self.logger.warning("No jobs to export")
+            return False
+        
+        try:
+            # Create headers
+            self.sheets_service.create_headers(sheet_name)
+            
+            # Append jobs
+            self.sheets_service.append_jobs(jobs, f"{sheet_name}!A2")
+            self.logger.info(f"Successfully exported {len(jobs)} jobs to Google Sheets")
+            return True
+        except Exception as e:
+            self.logger.error(f"Error exporting to sheets: {e}")
+            return False
+    
+    def save_results_locally(self, jobs: List, output_path: str = "results.json") -> bool:
+        """Save matched jobs to a local JSON file"""
+        try:
+            jobs_data = []
+            for job in jobs:
+                jobs_data.append({
+                    "title": job.title,
+                    "company": job.company,
+                    "location": job.location,
+                    "link": job.link,
+                    "description": job.description,
+                    "salary": job.salary,
+                    "job_type": job.job_type,
+                    "source": job.source,
+                    "match_score": job.match_score,
+                    "matched_skills": job.matched_skills,
+                    "missing_skills": job.missing_skills,
+                    "scraped_at": str(job.scraped_at)
+                })
+            
+            with open(output_path, 'w') as f:
+                json.dump(jobs_data, f, indent=2)
+            
+            self.logger.info(f"Results saved to {output_path}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Error saving results: {e}")
+            return False
+    
+    async def run_full_pipeline(
+        self,
+        search_query: str,
+        location: str = "",
+        pages: int = 3,
+        sources: Optional[List[str]] = None,
+        export_sheets: bool = True,
+        save_local: bool = True
+    ) -> None:
+        """
+        Run the complete job scraping and matching pipeline.
+        
+        Args:
+            search_query: Job search query
+            location: Geographic location for search
+            pages: Number of pages to scrape
+            sources: Job sources to scrape
+            export_sheets: Whether to export results to Google Sheets
+            save_local: Whether to save results locally
+        """
+        # Step 1: Scrape jobs
+        await self.scrape_jobs_async(search_query, location, pages, sources)
+        
+        # Step 2: Match and filter jobs
+        matched_jobs = self.match_and_filter_jobs()
+        
+        if not matched_jobs:
+            self.logger.warning("No matching jobs found")
+            return
+        
+        # Step 3: Export results
+        if export_sheets:
+            self.export_to_sheets(matched_jobs)
+        
+        if save_local:
+            self.save_results_locally(matched_jobs)
+        
+        self.logger.info("Pipeline completed successfully")
+
+
+async def main():
+    """Main entry point"""
     try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
-            s.login(gmail_user, gmail_pass)
-            s.sendmail(gmail_user, gmail_user, msg.as_string())
-        logger.info("[8] Digest email sent.")
-        print("[8] Digest email sent.")
+        # Initialize application
+        app = JobScraperApplication(
+            resume_path=Config.RESUME_FILE_PATH,
+            preferences_path="preferences.json" if Path("preferences.json").exists() else None
+        )
+        
+        # Run the full pipeline
+        await app.run_full_pipeline(
+            search_query="Python Developer",
+            location="Remote",
+            pages=2,
+            sources=["indeed"],
+            export_sheets=False,  # Set to True if Google Sheets is configured
+            save_local=True
+        )
+    
     except Exception as e:
-        logger.error(f"[8] Email failed: {e}")
-        print(f"[8] Email failed: {e}")
+        logger.error(f"Application error: {e}", exc_info=True)
+        sys.exit(1)
+
 
 if __name__ == "__main__":
-    asyncio.run(run_pipeline())
+    # Example: Create sample preferences file if it doesn't exist
+    if not Path("preferences.json").exists():
+        sample_prefs = {
+            "target_titles": ["Python Developer", "Backend Engineer", "Full Stack Developer"],
+            "required_skills": ["Python"],
+            "nice_to_have_skills": ["Django", "FastAPI", "PostgreSQL", "Docker"],
+            "min_salary": 80000,
+            "max_salary": 200000,
+            "locations": ["Remote", "San Francisco", "New York"],
+            "remote_preference": "any",
+            "job_types": ["Full-time"],
+            "min_match_score": 50.0
+        }
+        with open("preferences.json", "w") as f:
+            json.dump(sample_prefs, f, indent=2)
+        logger.info("Created sample preferences.json file")
+    
+    # Run the main application
+    asyncio.run(main())
+        # Launching browser (headed=True during debug, False for production)
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        
+        # Example using a generic job board structure (e.g., remote.co)
+        print(f"Searching for: {search_query}...")
+        await page.goto(f"https://remote.co/remote-jobs/search?search_keywords={search_query}")
+        
+        # Wait for the job list to load
+        await page.wait_for_selector('.job_listing')
+        
+        listings = await page.query_selector_all('.job_listing')
+        
+        for item in listings:
+            title_element = await item.query_selector('h3')
+            company_element = await item.query_selector('.company')
+            link_element = await item.query_selector('a')
+            
+            if title_element and link_element:
+                title = await title_element.inner_text()
+                company = await company_element.inner_text() if company_element else "Unknown"
+                link = await link_element.get_attribute('href')
+                
+                # Append to our list as a JobListing object
+                jobs.append(JobListing(
+                    title=title.strip(),
+                    company=company.strip(),
+                    location="Remote",
+                    link=f"https://remote.co{link}"
+                ))
+        
+        await browser.close()
+    return jobs
+
+# --- 4. LOGIC ENGINE (Filtering) ---
+def filter_jobs(jobs: List[JobListing], skills: List[str]) -> List[JobListing]:
+    filtered = []
+    for job in jobs:
+        # Simple scoring logic: count skill overlaps
+        score = sum(1 for skill in skills if skill.lower() in job.title.lower())
+        job.match_score = score
+        
+        # Only keep jobs that mention at least one core skill in the title/desc
+        if score > 0:
+            filtered.append(job)
+    return filtered
+
+# --- 5. MAIN EXECUTION ---
+async def main():
+    # User Preferences
+    my_skills = ["Software Engineer", "Backend", "Python", "React", "Node"]
+    search_term = "Software Engineer"
+    
+    # Run Pipeline
+    raw_jobs = await scrape_jobs(search_term)
+    matched_jobs = filter_jobs(raw_jobs, my_skills)
+    
+    if matched_jobs:
+        sheets = SheetsService()
+        sheets.append_jobs(matched_jobs)
+    else:
+        print("No matches found today.")
+
+if __name__ == "__main__":
+    asyncio.run(main())

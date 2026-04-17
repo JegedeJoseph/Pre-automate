@@ -1,0 +1,53 @@
+JOHN DOE
+john.doe@email.com | (555) 123-4567 | San Francisco, CA
+
+PROFESSIONAL SUMMARY
+Experienced software engineer with 5+ years of experience developing scalable web applications using Python and JavaScript. Proficient in full-stack development, cloud technologies, and DevOps practices. Strong problem-solving skills with a track record of delivering high-quality solutions.
+
+TECHNICAL SKILLS
+Languages: Python, JavaScript, TypeScript, SQL, HTML, CSS
+Frameworks: Django, Flask, FastAPI, React, Vue.js, Node.js
+Databases: PostgreSQL, MongoDB, Redis, MySQL
+Cloud & DevOps: AWS (EC2, S3, Lambda), Docker, Kubernetes, CI/CD, Git
+Tools & Technologies: Linux, Git, GitHub, GitLab, Jira, Confluence, Slack
+Methodologies: Agile, Scrum, Test-Driven Development (TDD)
+
+PROFESSIONAL EXPERIENCE
+
+Senior Software Engineer
+Tech Company Inc. | San Francisco, CA | Jan 2021 - Present
+• Led development of microservices architecture using Python and FastAPI
+• Implemented CI/CD pipelines using GitHub Actions and Docker
+• Mentored junior developers and conducted code reviews
+• Improved application performance by 40% through optimization
+Skills Used: Python, FastAPI, Docker, Kubernetes, PostgreSQL, AWS
+
+Full Stack Developer
+StartUp Solutions | Remote | Jul 2018 - Dec 2020
+• Developed full-stack applications using React and Django
+• Designed and implemented RESTful APIs
+• Managed database schemas and optimization
+• Collaborated with product team on feature implementation
+Skills Used: JavaScript, React, Python, Django, PostgreSQL, MongoDB
+
+Junior Developer
+Tech Startup | San Francisco, CA | Jun 2017 - Jun 2018
+• Developed web applications using HTML, CSS, and JavaScript
+• Assisted in backend development with Python and Flask
+• Participated in daily stand-ups and sprint planning
+• Fixed bugs and implemented new features based on requirements
+Skills Used: JavaScript, Python, Flask, HTML, CSS
+
+EDUCATION
+
+Bachelor of Science in Computer Science
+State University | Graduation: May 2017
+
+CERTIFICATIONS
+AWS Certified Solutions Architect - Associate | 2021
+Certified Kubernetes Administrator (CKA) | 2022
+
+PROJECTS
+Open Source Contributor
+• Contributed to Django and FastAPI projects
+• Fixed bugs and added new features for multiple open-source libraries
