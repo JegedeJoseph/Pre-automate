@@ -1,5 +1,5 @@
 {
-  "target_titles": ["Python Developer", "Backend Engineer", "Full Stack Developer", "Software Engineer"],
+  "target_titles": ["Python Developer","AI Engineer","Machine Learning Engineer","Senior Software Engineer", "Backend Engineer","Frontend Engineer", "Full Stack Developer", "Software Engineer"],
   "required_skills": ["Python"],
   "nice_to_have_skills": ["Django", "FastAPI", "PostgreSQL", "Docker", "AWS", "Kubernetes"],
   "min_salary": 80000,
