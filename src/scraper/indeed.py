@@ -60,22 +60,56 @@ class IndeedScraper:
     async def _extract_job_info(self, job_card, page: Page) -> JobListing:
         """Extract job information from a card"""
         try:
-            title = await job_card.evaluate('el => el.querySelector(".jobTitle")?.textContent || ""')
-            company = await job_card.evaluate('el => el.querySelector("[data-testid=\'company-name\']")?.textContent || ""')
-            location = await job_card.evaluate('el => el.querySelector("[data-testid=\'job-location\']")?.textContent || ""')
-            link = await job_card.evaluate('el => el.querySelector("a")?.href || ""')
+            # Try multiple selectors for title
+            title = ""
+            for selector in [".jobTitle", "a[data-testid='job-item-title']", ".jobs-search-results__job-title"]:
+                title_elem = await job_card.query_selector(selector)
+                if title_elem:
+                    title = await title_elem.inner_text()
+                    break
             
-            # Create job listing
-            job = JobListing(
-                title=title.strip(),
-                company=company.strip(),
-                location=location.strip(),
-                link=link.strip(),
-                source="Indeed"
-            )
+            # If no title found, skip
+            if not title:
+                return None
             
-            return job if job.title and job.company else None
+            # Try multiple selectors for company
+            company = ""
+            for selector in ["[data-testid='company-name']", ".company", ".companyName"]:
+                company_elem = await job_card.query_selector(selector)
+                if company_elem:
+                    company = await company_elem.inner_text()
+                    break
+            
+            # Try multiple selectors for location
+            location = ""
+            for selector in ["[data-testid='job-location']", ".location", ".jobLocation"]:
+                loc_elem = await job_card.query_selector(selector)
+                if loc_elem:
+                    location = await loc_elem.inner_text()
+                    break
+            
+            # Get link
+            link = ""
+            link_elem = await job_card.query_selector("a")
+            if link_elem:
+                href = await link_elem.get_attribute("href")
+                if href:
+                    link = href if href.startswith("http") else f"https://www.indeed.com{href}"
+            
+            # Create job listing only if we have title and link
+            if title and link:
+                job = JobListing(
+                    title=title.strip(),
+                    company=company.strip() or "Unknown",
+                    location=location.strip() or "Not specified",
+                    link=link.strip(),
+                    source="Indeed"
+                )
+                return job
+            
+            return None
         
         except Exception as e:
             self.logger.debug(f"Error extracting job info: {e}")
+            return None
             return None
